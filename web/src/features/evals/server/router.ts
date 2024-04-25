@@ -20,8 +20,8 @@ export const CreateEvalTemplate = z.object({
   projectId: z.string(),
   prompt: z.string(),
   model: EvalModelNames,
-  modelParameters: ZodModelConfig,
-  variables: z.array(z.string()),
+  modelParams: ZodModelConfig,
+  vars: z.array(z.string()),
   outputSchema: z.object({
     score: z.string(),
     reasoning: z.string(),
@@ -329,8 +329,8 @@ export const evalRouter = createTRPCRouter({
           projectId: input.projectId,
           prompt: input.prompt,
           model: input.model,
-          modelParams: input.modelParameters,
-          vars: input.variables,
+          modelParams: input.modelParams,
+          vars: input.vars,
           outputSchema: input.outputSchema,
         },
       });
@@ -378,5 +378,76 @@ export const evalRouter = createTRPCRouter({
         resourceId: input.evalConfigId,
         action: "update",
       });
+    }),
+
+  getLogs: protectedProjectProcedure
+    .input(
+      z.object({
+        projectId: z.string(),
+        limit: z.number().optional(),
+        page: z.number().optional(),
+        jobConfigurationId: z.string().optional(),
+      }),
+    )
+    .query(async ({ input, ctx }) => {
+      if (env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION === undefined) {
+        throw new Error("Evals available in cloud only");
+      }
+      throwIfNoAccess({
+        session: ctx.session,
+        projectId: input.projectId,
+        scope: "job:read",
+      });
+
+      const jobExecutions = await ctx.prisma.jobExecution.findMany({
+        where: {
+          projectId: input.projectId,
+          status: {
+            not: "CANCELLED",
+          },
+          ...(input.jobConfigurationId
+            ? { jobConfigurationId: input.jobConfigurationId }
+            : undefined),
+        },
+        select: {
+          id: true,
+          createdAt: true,
+          updatedAt: true,
+          projectId: true,
+          jobConfigurationId: true,
+          status: true,
+          startTime: true,
+          endTime: true,
+          error: true,
+          jobInputTraceId: true,
+          score: true,
+          jobConfiguration: {
+            select: {
+              evalTemplateId: true,
+            },
+          },
+        },
+        ...(input.limit !== undefined && input.page !== undefined
+          ? { take: input.limit, skip: input.page * input.limit }
+          : undefined),
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+      const count = await ctx.prisma.jobExecution.count({
+        where: {
+          projectId: input.projectId,
+          status: {
+            not: "CANCELLED",
+          },
+          ...(input.jobConfigurationId
+            ? { jobConfigurationId: input.jobConfigurationId }
+            : undefined),
+        },
+      });
+      return {
+        data: jobExecutions,
+        totalCount: count,
+      };
     }),
 });

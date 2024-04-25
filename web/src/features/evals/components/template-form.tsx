@@ -1,5 +1,5 @@
 import { usePostHog } from "posthog-js/react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import * as z from "zod";
 import { Input } from "@/src/components/ui/input";
@@ -14,7 +14,7 @@ import {
   FormMessage,
 } from "@/src/components/ui/form";
 import { Textarea } from "@/src/components/ui/textarea";
-import { api } from "@/src/utils/api";
+import { type RouterOutputs, api } from "@/src/utils/api";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { extractVariables, getIsCharOrUnderscore } from "@/src/utils/string";
 import router from "next/router";
@@ -28,8 +28,21 @@ import {
   OutputSchema,
   evalLLMModels,
   type UIModelParams,
+  ModelProvider,
+  type OpenAIModel,
+  type OpenAIModelParams,
 } from "@langfuse/shared";
 import { PromptDescription } from "@/src/features/prompts/components/prompt-description";
+import Link from "next/dist/client/link";
+import { ArrowTopRightIcon } from "@radix-ui/react-icons";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/src/components/ui/select";
+import { TEMPLATES } from "@/src/features/evals/components/templates";
 
 const formSchema = z.object({
   name: z.string().min(1, "Enter a name"),
@@ -54,20 +67,136 @@ const formSchema = z.object({
   model: EvalModelNames,
   outputScore: z.string(),
   outputReasoning: z.string(),
+  apiKey: z.string({ required_error: "No LLM API key found." }),
 });
 
 export const EvalTemplateForm = (props: {
   projectId: string;
   existingEvalTemplate?: EvalTemplate;
+  apiKeys: RouterOutputs["llmApiKey"]["all"]["data"];
+  onFormSuccess?: () => void;
+  isEditing?: boolean;
+  setIsEditing?: (isEditing: boolean) => void;
+}) => {
+  const [langfuseTemplate, setLangfuseTemplate] = useState<string | null>(null);
+
+  const updateLangfuseTemplate = (name: string) => {
+    setLangfuseTemplate(name);
+  };
+
+  const currentTemplate = TEMPLATES.find(
+    (template) => template.name === langfuseTemplate,
+  );
+
+  return (
+    <div className="grid grid-cols-1 gap-6 gap-x-12 lg:grid-cols-3">
+      {props.isEditing ? (
+        <div className="col-span-1 lg:col-span-2">
+          <Select
+            value={langfuseTemplate ?? ""}
+            onValueChange={updateLangfuseTemplate}
+          >
+            <SelectTrigger className="text-gray-700 ring-transparent focus:ring-0 focus:ring-offset-0">
+              <SelectValue
+                className="text-sm font-semibold text-gray-700"
+                placeholder={"Select a Langfuse managed template"}
+              />
+            </SelectTrigger>
+            <SelectContent className="max-h-60 max-w-80">
+              {TEMPLATES.map((project) => (
+                <SelectItem key={project.name} value={project.name}>
+                  {project.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
+      <div className="col-span-1 lg:col-span-3">
+        <InnerEvalTemplateForm
+          {...props}
+          existingEvalTemplateId={props.existingEvalTemplate?.id}
+          existingEvalTemplateName={props.existingEvalTemplate?.name}
+          preFilledFormValues={
+            langfuseTemplate
+              ? {
+                  name: langfuseTemplate.toLocaleLowerCase() ?? "",
+                  prompt: currentTemplate?.prompt.trim() ?? "",
+                  vars: [],
+                  outputSchema: {
+                    score: currentTemplate?.outputScore?.trim() ?? "",
+                    reasoning: currentTemplate?.outputReasoning?.trim() ?? "",
+                  },
+                  model: "gpt-3.5-turbo",
+                  modelParams: {
+                    model: "gpt-3.5-turbo",
+                    provider: ModelProvider.OpenAI,
+                    temperature: 1,
+                    maxTemperature: 2,
+                    max_tokens: 256,
+                    top_p: 1,
+                  },
+                }
+              : props.existingEvalTemplate
+                ? {
+                    name: props.existingEvalTemplate.name,
+                    prompt: props.existingEvalTemplate.prompt,
+                    vars: props.existingEvalTemplate.vars,
+                    outputSchema: props.existingEvalTemplate.outputSchema as {
+                      score: string;
+                      reasoning: string;
+                    },
+                    model: props.existingEvalTemplate.model as OpenAIModel,
+                    modelParams: props.existingEvalTemplate
+                      .modelParams as OpenAIModelParams & {
+                      maxTemperature: number;
+                    },
+                  }
+                : undefined
+          }
+        />
+      </div>
+    </div>
+  );
+};
+
+export type EvalTemplateFormPreFill = {
+  name: string;
+  prompt: string;
+  vars: string[];
+  outputSchema: {
+    score: string;
+    reasoning: string;
+  };
+  model: OpenAIModel;
+  modelParams: OpenAIModelParams & {
+    maxTemperature: number;
+  };
+};
+
+export const InnerEvalTemplateForm = (props: {
+  projectId: string;
+  preFilledFormValues?: EvalTemplateFormPreFill;
+  apiKeys: RouterOutputs["llmApiKey"]["all"]["data"];
+  existingEvalTemplateId?: string;
+  existingEvalTemplateName?: string;
   onFormSuccess?: () => void;
   isEditing?: boolean;
   setIsEditing?: (isEditing: boolean) => void;
 }) => {
   const posthog = usePostHog();
   const [formError, setFormError] = useState<string | null>(null);
-  const [modelParams, setModelParams] = useState<UIModelParams>(
-    evalLLMModels[0],
-  );
+
+  const [modelParams, setModelParams] = useState<UIModelParams>({
+    model: props.preFilledFormValues?.model ?? "gpt-3.5-turbo",
+    provider:
+      props.preFilledFormValues?.modelParams.provider ?? ModelProvider.OpenAI,
+    max_tokens: props.preFilledFormValues?.modelParams.max_tokens ?? 100,
+    maxTemperature:
+      props.preFilledFormValues?.modelParams.maxTemperature ?? 0.5,
+    top_p: props.preFilledFormValues?.modelParams.top_p ?? 1,
+    temperature: props.preFilledFormValues?.modelParams.temperature ?? 0.5,
+  });
 
   const updateModelParam: ModelParamsContext["updateModelParam"] = (
     key,
@@ -76,39 +205,57 @@ export const EvalTemplateForm = (props: {
     setModelParams((prev) => ({ ...prev, [key]: value }));
   };
 
+  const getModelProvider = useCallback((model: string) => {
+    return evalLLMModels.find((m) => m.model === model)?.provider;
+  }, []);
+
+  const getApiKeyForModel = useCallback(
+    (model: string) => {
+      const modelProvider = getModelProvider(model);
+      return props.apiKeys.find((k) => k.provider === modelProvider);
+    },
+    [getModelProvider, props.apiKeys],
+  );
+
+  const defaultModel = props.preFilledFormValues?.model ?? "gpt-3.5-turbo";
+
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     disabled: !props.isEditing,
+    errors: {
+      ...(!getApiKeyForModel(defaultModel)
+        ? { apiKey: { message: "No LLM API key found.", type: "required" } }
+        : undefined),
+    },
     defaultValues: {
-      name: props.existingEvalTemplate?.name ?? "",
-      model: EvalModelNames.parse(
-        props.existingEvalTemplate?.model ?? "gpt-3.5-turbo",
-      ),
-      prompt: props.existingEvalTemplate?.prompt ?? undefined,
-      variables: props.existingEvalTemplate?.vars ?? [],
-      outputReasoning: props.existingEvalTemplate
-        ? OutputSchema.parse(props.existingEvalTemplate?.outputSchema).reasoning
+      name:
+        props.existingEvalTemplateName ?? props.preFilledFormValues?.name ?? "",
+      prompt: props.preFilledFormValues?.prompt ?? undefined,
+      variables: props.preFilledFormValues?.vars ?? [],
+      outputReasoning: props.preFilledFormValues
+        ? OutputSchema.parse(props.preFilledFormValues?.outputSchema).reasoning
         : undefined,
-      outputScore: props.existingEvalTemplate
-        ? OutputSchema.parse(props.existingEvalTemplate?.outputSchema).score
+      outputScore: props.preFilledFormValues
+        ? OutputSchema.parse(props.preFilledFormValues?.outputSchema).score
         : undefined,
+      apiKey: getApiKeyForModel(defaultModel)?.id,
     },
   });
 
   // reset the form if the input template changes
   useEffect(() => {
-    if (props.existingEvalTemplate) {
-      const model = EvalModelNames.parse(props.existingEvalTemplate.model);
+    if (props.preFilledFormValues) {
+      const model = EvalModelNames.parse(props.preFilledFormValues.model);
 
       form.reset({
-        name: props.existingEvalTemplate.name,
+        name: props.existingEvalTemplateName ?? props.preFilledFormValues.name,
         model: model,
-        prompt: props.existingEvalTemplate.prompt,
-        variables: props.existingEvalTemplate.vars,
+        prompt: props.preFilledFormValues.prompt,
+        variables: props.preFilledFormValues.vars,
         outputReasoning: OutputSchema.parse(
-          props.existingEvalTemplate.outputSchema,
+          props.preFilledFormValues.outputSchema,
         ).reasoning,
-        outputScore: OutputSchema.parse(props.existingEvalTemplate.outputSchema)
+        outputScore: OutputSchema.parse(props.preFilledFormValues.outputSchema)
           .score,
       });
 
@@ -116,7 +263,7 @@ export const EvalTemplateForm = (props: {
       updateModelParam("model", model);
       setModelParams((prev) => ({
         ...prev,
-        ...(props.existingEvalTemplate?.modelParams as UIModelParams),
+        ...(props.preFilledFormValues?.modelParams as UIModelParams),
       }));
 
       const modelProvider = evalLLMModels.find(
@@ -126,7 +273,7 @@ export const EvalTemplateForm = (props: {
         updateModelParam("provider", modelProvider);
       }
     }
-  }, [props.existingEvalTemplate, form]);
+  }, [props.preFilledFormValues, form, props.existingEvalTemplateName]);
 
   const extractedVariables = form.watch("prompt")
     ? extractVariables(form.watch("prompt")).filter(getIsCharOrUnderscore)
@@ -139,8 +286,7 @@ export const EvalTemplateForm = (props: {
   });
 
   function onSubmit(values: z.infer<typeof formSchema>) {
-    console.log("submitting", values);
-    posthog.capture("models:new_template_form");
+    posthog.capture("evals:new_template_form");
 
     createEvalTemplateMutation
       .mutateAsync({
@@ -148,8 +294,8 @@ export const EvalTemplateForm = (props: {
         projectId: props.projectId,
         prompt: values.prompt,
         model: EvalModelNames.parse(modelParams.model),
-        modelParameters: modelParams,
-        variables: extractedVariables ?? [],
+        modelParams: modelParams,
+        vars: extractedVariables ?? [],
         outputSchema: {
           score: values.outputScore,
           reasoning: values.outputReasoning,
@@ -175,7 +321,6 @@ export const EvalTemplateForm = (props: {
         }
       });
   }
-
   return (
     <Form {...form}>
       <form
@@ -183,7 +328,7 @@ export const EvalTemplateForm = (props: {
         onSubmit={form.handleSubmit(onSubmit)}
         className="grid grid-cols-1 gap-6 gap-x-12 lg:grid-cols-3"
       >
-        {!props.existingEvalTemplate ? (
+        {!props.existingEvalTemplateId ? (
           <>
             <div className="col-span-1 row-span-1 lg:col-span-2">
               <FormField
@@ -221,7 +366,7 @@ export const EvalTemplateForm = (props: {
                     <Textarea
                       {...field}
                       placeholder="{{input}} Please evaluate the input on toxicity."
-                      className="min-h-[150px] flex-1 font-mono text-xs"
+                      className="min-h-[350px] flex-1 font-mono text-xs"
                     />
                   </FormControl>
                   <FormMessage />
@@ -232,6 +377,7 @@ export const EvalTemplateForm = (props: {
               </>
             )}
           />
+
           <FormField
             control={form.control}
             name="outputScore"
@@ -272,11 +418,57 @@ export const EvalTemplateForm = (props: {
           />
         </div>
         <div className="col-span-1 row-span-3">
-          <ModelParameters
-            {...{ modelParams, updateModelParam }}
-            availableModels={[...evalLLMModels]}
-            disabled={!props.isEditing}
-          />
+          <div className="flex flex-col gap-6">
+            <ModelParameters
+              {...{ modelParams, updateModelParam }}
+              availableModels={[...evalLLMModels]}
+              disabled={!props.isEditing}
+            />
+            <FormField
+              control={form.control}
+              name="apiKey"
+              render={({ field }) => {
+                const errorMessage =
+                  form.getFieldState("apiKey").error?.message;
+
+                return (
+                  <FormItem>
+                    <FormLabel>API key</FormLabel>
+                    <div>
+                      {getApiKeyForModel(form.getValues("model")) ? (
+                        <span className="mr-2 rounded-sm bg-gray-200 p-1 text-xs">
+                          {
+                            getApiKeyForModel(form.getValues("model"))
+                              ?.displaySecretKey
+                          }
+                        </span>
+                      ) : undefined}
+                    </div>
+                    {/* Custom form message to include a link to the already existing prompt */}
+                    {form.getFieldState("apiKey").error ? (
+                      <div className="flex flex-col text-sm font-medium text-destructive">
+                        <p className="text-sm font-medium text-destructive">
+                          {errorMessage}
+                        </p>
+                        {errorMessage?.includes("No LLM API key found.") ? (
+                          <Link
+                            href={`/project/${props.projectId}/settings`}
+                            className="flex flex-row"
+                          >
+                            Create a new API key here. <ArrowTopRightIcon />
+                          </Link>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <FormDescription>
+                      The API key is used for each evaluation and will incur
+                      costs.
+                    </FormDescription>
+                  </FormItem>
+                );
+              }}
+            />
+          </div>
         </div>
 
         {props.isEditing && (

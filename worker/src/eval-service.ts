@@ -15,8 +15,12 @@ import {
   evalLLMModels,
   ZodModelConfig,
   availableEvalVariables,
+  LangfuseNotFoundError,
+  ForbiddenError,
+  ValidationError,
 } from "@langfuse/shared";
 import { Prisma } from "@langfuse/shared";
+import { decrypt } from "@langfuse/shared/encryption";
 import { kyselyPrisma, prisma } from "@langfuse/shared/src/db";
 import { randomUUID } from "crypto";
 import { evalQueue } from "./redis/consumer";
@@ -169,7 +173,7 @@ export const evaluate = async ({
     .executeTakeFirstOrThrow();
 
   if (!job?.job_input_trace_id) {
-    throw new Error("Jobs can only be executed on traces for now.");
+    throw new ForbiddenError("Jobs can only be executed on traces for now.");
   }
 
   if (job.status === "CANCELLED") {
@@ -234,7 +238,7 @@ export const evaluate = async ({
     .parse(template.output_schema);
 
   if (!parsedOutputSchema) {
-    throw new Error("Output schema not found");
+    throw new ValidationError("Output schema not found");
   }
 
   const openAIFunction = z.object({
@@ -247,11 +251,30 @@ export const evaluate = async ({
   const modelParams = ZodModelConfig.parse(template.model_params);
 
   if (!provider) {
-    throw new Error(`Model ${evalModel} provider not found`);
+    throw new LangfuseNotFoundError(`Model ${evalModel} provider not found`);
+  }
+
+  // the apiKey.secret_key must never be printed to the console or returned to the client.
+  const apiKey = await kyselyPrisma.$kysely
+    .selectFrom("llm_api_keys")
+    .selectAll()
+    .where("project_id", "=", event.projectId)
+    .where("provider", "=", provider)
+    .executeTakeFirst();
+
+  if (!apiKey) {
+    logger.error(
+      `API key for provider ${provider} and project ${event.projectId} not found. Failing job id ${job.id}`
+    );
+    // this will fail the eval execution if a user deletes the API key.
+    throw new LangfuseNotFoundError(
+      `API key for provider ${provider} and project ${event.projectId} not found.`
+    );
   }
 
   const completion = await fetchLLMCompletion({
     streaming: false,
+    apiKey: decrypt(apiKey.secret_key), // decrypt the secret key
     messages: [{ role: ChatMessageRole.System, content: prompt }],
     modelParams: {
       provider: provider,
@@ -348,7 +371,17 @@ export async function extractVariablesFromTrace(
         ) // query the internal column name raw
         .where("id", "=", traceId)
         .where("project_id", "=", projectId)
-        .executeTakeFirstOrThrow();
+        .executeTakeFirst();
+
+      // user facing errors
+      if (!trace) {
+        logger.error(
+          `Trace ${traceId} for project ${projectId} not found. Eval will succeed without trace input. Please ensure the mapped data on the trace exists and consider extending the job delay.`
+        );
+        throw new LangfuseNotFoundError(
+          `Trace ${traceId} for project ${projectId} not found. Eval will succeed without trace input. Please ensure the mapped data on the trace exists and consider extending the job delay.`
+        );
+      }
 
       mappingResult.push({
         var: variable,
@@ -385,7 +418,17 @@ export async function extractVariablesFromTrace(
         .where("project_id", "=", projectId)
         .where("name", "=", mapping.objectName)
         .orderBy("start_time", "desc")
-        .executeTakeFirstOrThrow();
+        .executeTakeFirst();
+
+      // user facing errors
+      if (!observation) {
+        logger.error(
+          `Observation ${mapping.objectName} for trace ${traceId} not found. Eval will succeed without trace input. Please ensure the mapped data on the trace exists and consider extending the job delay.`
+        );
+        throw new LangfuseNotFoundError(
+          `Observation ${mapping.objectName} for trace ${traceId} not found. Eval will succeed without trace input. Please ensure the mapped data on the trace exists and consider extending the job delay.`
+        );
+      }
 
       mappingResult.push({
         var: variable,
