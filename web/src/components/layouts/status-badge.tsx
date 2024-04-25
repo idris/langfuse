@@ -27,7 +27,7 @@ export const StatusBadge = (props: { className?: string; type: Status }) => {
               ? "animate-ping bg-green-500"
               : "bg-gray-500",
           )}
-        ></span>
+        />
         <span
           className={cn(
             "relative inline-flex h-2 w-2 rounded-full ",
@@ -35,7 +35,7 @@ export const StatusBadge = (props: { className?: string; type: Status }) => {
               ? "bg-green-600"
               : "bg-gray-600",
           )}
-        ></span>
+        />
       </span>
       <span>{props.type}</span>
     </div>
